@@ -1,0 +1,24 @@
+[package]
+name = "yew-api-hook"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mara Schulke <mara@schulke.xyz>"]
+license = "MIT"
+homepage = "https://github.com/mara214/yew-api-hook"
+repository = "https://github.com/mara214/yew-api-hook.git"
+readme = "README.md"
+categories = ["gui", "network-programming", "wasm", "web-programming"]
+keywords = ["yew", "asynchronous", "hooks", "api", "wasm"]
+description = """
+Use asynchronous api requests in conjunction with yew's suspense feature
+"""
+
+[dependencies]
+yew = "0.20"
+yew-hooks = "0.2"
+futures = "0.3"
+async-trait = "0.1"
+yewdux = { version = "0.9", optional = true }
+
+[features]
+cache = ["yewdux"]
