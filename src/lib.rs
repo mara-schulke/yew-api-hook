@@ -37,7 +37,7 @@ pub trait Request: std::fmt::Debug + PartialEq + Clone {
 
     /// Store or otherwise handle the data of a succesful run of the request
     /// E.g. Store the requested data in a yewdux store
-    fn store(_: Self::Output) -> () {}
+    fn store(_: Self::Output) {}
 }
 
 /// A cachable request which may load a cached result from a yewdux store

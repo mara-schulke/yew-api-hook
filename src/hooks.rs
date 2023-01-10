@@ -12,7 +12,7 @@ use yewdux::prelude::use_store_value;
 #[hook]
 pub fn use_api<R: Request + 'static>(request: R) -> SuspensionResult<Result<R::Output, R::Error>> {
     let deps = request.clone();
-    let result = hooks::use_future_with_deps(
+    let result = inner::use_future_with_deps(
         |_| async move {
             let result = request.run().await;
 
@@ -28,17 +28,17 @@ pub fn use_api<R: Request + 'static>(request: R) -> SuspensionResult<Result<R::O
     Ok((*result).to_owned())
 }
 
+pub struct LazyResponse<R: Request + 'static> {
+    pub run: Callback<(), ()>,
+    pub data: Option<SuspensionResult<Result<R::Output, R::Error>>>,
+}
+
 /// Useful when not wanting to run a request on mount, e.g. for a logout button
 /// You may run the request multiple times through multiple emits of the callback
 #[hook]
-pub fn use_api_lazy<R: Request + 'static>(
-    request: R,
-) -> (
-    Callback<(), ()>,
-    Option<SuspensionResult<Result<R::Output, R::Error>>>,
-) {
+pub fn use_api_lazy<R: Request + 'static>(request: R) -> LazyResponse<R> {
     let deps = request.clone();
-    let (exec, result) = hooks::use_future_callback(
+    let (run, result) = inner::use_future_callback(
         |_| async move {
             let result = request.run().await;
 
@@ -50,9 +50,9 @@ pub fn use_api_lazy<R: Request + 'static>(
         },
         deps,
     );
-    let result = result.map(|res| res.map(|res| (*res).clone()));
+    let data = result.map(|res| res.map(|res| (*res).clone()));
 
-    (exec, result)
+    LazyResponse { run, data }
 }
 
 /// Use the locally cached data instead of running the api request if possible
@@ -63,7 +63,7 @@ pub fn use_api_or_store<R: Request + CachableRequest + 'static>(
 ) -> SuspensionResult<Result<R::Output, R::Error>> {
     let store = use_store_value::<R::Store>();
     let deps = request.clone();
-    let result = hooks::use_future_with_deps(
+    let result = inner::use_future_with_deps(
         |_| async move {
             if let Some(cache) = request.load(store) {
                 return Ok(cache);
@@ -89,13 +89,10 @@ pub fn use_api_or_store<R: Request + CachableRequest + 'static>(
 #[hook]
 pub fn use_api_or_store_lazy<R: Request + CachableRequest + 'static>(
     request: R,
-) -> (
-    Callback<(), ()>,
-    Option<SuspensionResult<Result<R::Output, R::Error>>>,
-) {
+) -> LazyResponse<R> {
     let store = use_store_value::<R::Store>();
     let deps = request.clone();
-    let (exec, result) = hooks::use_future_callback(
+    let (run, result) = inner::use_future_callback(
         |_| async move {
             if let Some(cache) = request.load(store) {
                 return Ok(cache);
@@ -112,13 +109,13 @@ pub fn use_api_or_store_lazy<R: Request + CachableRequest + 'static>(
         deps,
     );
 
-    let result = result.map(|res| res.map(|res| (*res).clone()));
+    let data = result.map(|res| res.map(|res| (*res).clone()));
 
-    (exec, result)
+    LazyResponse { run, data }
 }
 
 /// from yew@next
-mod hooks {
+mod inner {
     use std::borrow::Borrow;
     use std::cell::Cell;
     use std::fmt;
@@ -227,13 +224,12 @@ mod hooks {
         let latest_id = use_state(|| Cell::new(0u32));
 
         let suspension = {
-            let execution = execution.clone();
             let output = output.clone();
 
             let deps = (deps, execution.clone());
             use_memo_base(
                 move |deps| {
-                    if *execution == false {
+                    if !(*execution) {
                         return (None, deps);
                     }
 
@@ -249,7 +245,7 @@ mod hooks {
                         }
                         execution.set(false);
                     });
-                    (Some(suspension), (deps.0.to_owned(), deps.1.to_owned()))
+                    (Some(suspension), (deps.0.to_owned(), deps.1))
                 },
                 deps,
             )
