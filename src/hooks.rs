@@ -28,6 +28,34 @@ pub fn use_api<R: Request + 'static>(request: R) -> SuspensionResult<Result<R::O
     Ok((*result).to_owned())
 }
 
+/// The basic api hook which requests data on mount and preserves its
+/// data through out the component lifetime
+///
+/// The handler is emitted every time a request is issued with the regarding result
+#[hook]
+pub fn use_api_with_handler<R: Request + 'static>(
+    request: R,
+    handler: Callback<Result<R::Output, R::Error>, ()>,
+) -> SuspensionResult<Result<R::Output, R::Error>> {
+    let deps = request.clone();
+    let result = inner::use_future_with_deps(
+        |_| async move {
+            let result = request.run().await;
+
+            handler.emit(result.to_owned());
+
+            if let Ok(ref data) = result {
+                R::store(data.to_owned());
+            }
+
+            result
+        },
+        deps,
+    )?;
+
+    Ok((*result).to_owned())
+}
+
 pub struct LazyResponse<R: Request + 'static> {
     pub run: Callback<(), ()>,
     pub data: Option<SuspensionResult<Result<R::Output, R::Error>>>,
@@ -41,6 +69,35 @@ pub fn use_api_lazy<R: Request + 'static>(request: R) -> LazyResponse<R> {
     let (run, result) = inner::use_future_callback(
         |_| async move {
             let result = request.run().await;
+
+            if let Ok(ref data) = result {
+                R::store(data.to_owned());
+            }
+
+            result
+        },
+        deps,
+    );
+    let data = result.map(|res| res.map(|res| (*res).clone()));
+
+    LazyResponse { run, data }
+}
+
+/// Useful when not wanting to run a request on mount, e.g. for a logout button
+/// You may run the request multiple times through multiple emits of the callback
+///
+/// The handler is emitted every time a request is issued with the regarding result
+#[hook]
+pub fn use_api_lazy_with_callback<R: Request + 'static>(
+    request: R,
+    handler: Callback<Result<R::Output, R::Error>, ()>,
+) -> LazyResponse<R> {
+    let deps = request.clone();
+    let (run, result) = inner::use_future_callback(
+        |_| async move {
+            let result = request.run().await;
+
+            handler.emit(result.to_owned());
 
             if let Ok(ref data) = result {
                 R::store(data.to_owned());
