@@ -7,42 +7,58 @@ use yew::suspense::SuspensionResult;
 #[cfg(feature = "cache")]
 use yewdux::prelude::use_store_value;
 
+/// Use API Options
+///
+/// You may specify dependencies which force the request to be reevaluated
+/// and a handler which is called every time a request is ran
+#[derive(Clone, Debug)]
+pub struct Options<R, D>
+where
+    R: Request + 'static,
+    D: Clone + PartialEq + 'static,
+{
+    pub deps: Option<D>,
+    pub handler: Option<Callback<Result<R::Output, R::Error>, ()>>,
+}
+
+impl<R, D> Default for Options<R, D>
+where
+    R: Request + 'static,
+    D: Clone + PartialEq + 'static,
+{
+    fn default() -> Self {
+        Self {
+            deps: None,
+            handler: None,
+        }
+    }
+}
+
 /// The basic api hook which requests data on mount and preserves its
 /// data through out the component lifetime
 #[hook]
 pub fn use_api<R: Request + 'static>(request: R) -> SuspensionResult<Result<R::Output, R::Error>> {
-    let deps = request.clone();
-    let result = inner::use_future_with_deps(
-        |_| async move {
-            let result = request.run().await;
-
-            if let Ok(ref data) = result {
-                R::store(data.to_owned());
-            }
-
-            result
-        },
-        deps,
-    )?;
-
-    Ok((*result).to_owned())
+    use_api_with_options::<R, ()>(request, Default::default())
 }
 
 /// The basic api hook which requests data on mount and preserves its
-/// data through out the component lifetime
+/// data through out the component lifetime.
 ///
-/// The handler is emitted every time a request is issued with the regarding result
+/// Reruns the request once the dependencies update
 #[hook]
-pub fn use_api_with_handler<R: Request + 'static>(
+pub fn use_api_with_options<R: Request + 'static, D: Clone + PartialEq + 'static>(
     request: R,
-    handler: Callback<Result<R::Output, R::Error>, ()>,
+    options: Options<R, D>,
 ) -> SuspensionResult<Result<R::Output, R::Error>> {
-    let deps = request.clone();
-    let result = inner::use_future_with_deps(
-        |_| async move {
-            let result = request.run().await;
+    let deps = (request, options.deps);
 
-            handler.emit(result.to_owned());
+    let result = inner::use_future_with_deps(
+        |deps| async move {
+            let result = deps.0.run().await;
+
+            if let Some(ref handler) = options.handler {
+                handler.emit(result.to_owned());
+            }
 
             if let Ok(ref data) = result {
                 R::store(data.to_owned());
@@ -56,6 +72,7 @@ pub fn use_api_with_handler<R: Request + 'static>(
     Ok((*result).to_owned())
 }
 
+/// A lazy api response which you can trigger through the `run` callback
 pub struct LazyResponse<R: Request + 'static> {
     pub run: Callback<(), ()>,
     pub data: Option<SuspensionResult<Result<R::Output, R::Error>>>,
@@ -65,68 +82,118 @@ pub struct LazyResponse<R: Request + 'static> {
 /// You may run the request multiple times through multiple emits of the callback
 #[hook]
 pub fn use_api_lazy<R: Request + 'static>(request: R) -> LazyResponse<R> {
-    let deps = request.clone();
-    let (run, result) = inner::use_future_callback(
-        |_| async move {
-            let result = request.run().await;
+    use_api_lazy_with_options::<R, ()>(request, Default::default())
+}
 
-            if let Ok(ref data) = result {
-                R::store(data.to_owned());
-            }
+/// Useful when not wanting to run a request on mount, e.g. for a logout button
+/// You may run the request multiple times through multiple emits of the callback
+#[hook]
+pub fn use_api_lazy_with_options<R: Request + 'static, D: Clone + PartialEq + 'static>(
+    request: R,
+    options: Options<R, D>,
+) -> LazyResponse<R> {
+    let DynLazyResponse { run, data } = use_api_dynamic_with_options::<R, D>(options);
 
-            result
-        },
-        deps,
-    );
-    let data = result.map(|res| res.map(|res| (*res).clone()));
+    let run = Callback::from(move |_| {
+        run.emit(request.clone());
+    });
 
     LazyResponse { run, data }
+}
+
+pub struct DynLazyResponse<R: Request + 'static> {
+    pub run: Callback<R, ()>,
+    pub data: Option<SuspensionResult<Result<R::Output, R::Error>>>,
 }
 
 /// Useful when not wanting to run a request on mount, e.g. for a logout button
 /// You may run the request multiple times through multiple emits of the callback
 ///
-/// The handler is emitted every time a request is issued with the regarding result
+/// By using the dynamic hook you can build the request with its parameters at runtime
 #[hook]
-pub fn use_api_lazy_with_callback<R: Request + 'static>(
-    request: R,
-    handler: Callback<Result<R::Output, R::Error>, ()>,
-) -> LazyResponse<R> {
-    let deps = request.clone();
+pub fn use_api_dynamic<R: Request + 'static>() -> DynLazyResponse<R> {
+    use_api_dynamic_with_options::<R, ()>(Default::default())
+}
+
+/// Useful when not wanting to run a request on mount, e.g. for a logout button
+/// You may run the request multiple times through multiple emits of the callback
+///
+/// By using the dynamic hook you can build the request with its parameters at runtime
+#[hook]
+pub fn use_api_dynamic_with_options<R: Request + 'static, D: Clone + PartialEq + 'static>(
+    options: Options<R, D>,
+) -> DynLazyResponse<R> {
+    let request = use_state(|| Option::<R>::None);
+
+    let deps = ((*request).clone(), options.deps);
+
     let (run, result) = inner::use_future_callback(
-        |_| async move {
+        |request| async move {
+            let Some(ref request) = request.0 else {
+                return None;
+            };
+
             let result = request.run().await;
 
-            handler.emit(result.to_owned());
+            if let Some(ref handler) = options.handler {
+                handler.emit(result.to_owned());
+            }
 
             if let Ok(ref data) = result {
                 R::store(data.to_owned());
             }
 
-            result
+            Some(result)
         },
         deps,
     );
-    let data = result.map(|res| res.map(|res| (*res).clone()));
 
-    LazyResponse { run, data }
+    let run = Callback::from(move |r| {
+        request.set(Some(r));
+        run.emit(());
+    });
+
+    if let Some(Ok(false)) = result.as_ref().map(|o| o.as_ref().map(|sr| sr.is_some())) {
+        return DynLazyResponse { run, data: None };
+    }
+
+    let data = result.map(|res| res.map(|res| (*res).clone().unwrap()));
+
+    DynLazyResponse { run, data }
 }
 
 /// Use the locally cached data instead of running the api request if possible
 #[cfg(feature = "cache")]
 #[hook]
-pub fn use_api_or_store<R: Request + CachableRequest + 'static>(
+pub fn use_cachable_api<R: Request + CachableRequest + 'static>(
     request: R,
 ) -> SuspensionResult<Result<R::Output, R::Error>> {
+    use_cachable_api_with_options::<R, ()>(request, Default::default())
+}
+
+/// Use the locally cached data instead of running the api request if possible
+#[cfg(feature = "cache")]
+#[hook]
+pub fn use_cachable_api_with_options<
+    R: Request + CachableRequest + 'static,
+    D: Clone + PartialEq + 'static,
+>(
+    request: R,
+    options: Options<R, D>,
+) -> SuspensionResult<Result<R::Output, R::Error>> {
     let store = use_store_value::<R::Store>();
-    let deps = request.clone();
+    let deps = (request, options.deps);
     let result = inner::use_future_with_deps(
-        |_| async move {
-            if let Some(cache) = request.load(store) {
+        |deps| async move {
+            if let Some(cache) = deps.0.load(store) {
                 return Ok(cache);
             }
 
-            let result = request.run().await;
+            let result = deps.0.run().await;
+
+            if let Some(ref handler) = options.handler {
+                handler.emit(result.to_owned());
+            }
 
             if let Ok(ref data) = result {
                 R::store(data.to_owned());
@@ -144,31 +211,92 @@ pub fn use_api_or_store<R: Request + CachableRequest + 'static>(
 /// Only returns a result once the callback was emitted
 #[cfg(feature = "cache")]
 #[hook]
-pub fn use_api_or_store_lazy<R: Request + CachableRequest + 'static>(
+pub fn use_cachable_api_lazy<R: Request + CachableRequest + 'static>(
     request: R,
 ) -> LazyResponse<R> {
+    use_cachable_api_lazy_with_options::<R, ()>(request, Default::default())
+}
+
+/// Use the locally cached data instead of running the api request if possible
+/// Only returns a result once the callback was emitted
+#[cfg(feature = "cache")]
+#[hook]
+pub fn use_cachable_api_lazy_with_options<
+    R: Request + CachableRequest + 'static,
+    D: Clone + PartialEq + 'static,
+>(
+    request: R,
+    options: Options<R, D>,
+) -> LazyResponse<R> {
+    let DynLazyResponse { run, data } = use_cachable_api_dynamic_with_options::<R, D>(options);
+
+    let run = Callback::from(move |_| {
+        run.emit(request.clone());
+    });
+
+    LazyResponse { run, data }
+}
+
+#[cfg(feature = "cache")]
+#[hook]
+pub fn use_cachable_api_dynamic<R: Request + CachableRequest + 'static>() -> DynLazyResponse<R> {
+    use_cachable_api_dynamic_with_options::<R, ()>(Default::default())
+}
+
+/// Useful when not wanting to run a request on mount, e.g. for a logout button
+/// You may run the request multiple times through multiple emits of the callback
+///
+/// By using the dynamic hook you can build the request with its parameters at runtime
+#[cfg(feature = "cache")]
+#[hook]
+pub fn use_cachable_api_dynamic_with_options<
+    R: Request + CachableRequest + 'static,
+    D: Clone + PartialEq + 'static,
+>(
+    options: Options<R, D>,
+) -> DynLazyResponse<R> {
     let store = use_store_value::<R::Store>();
-    let deps = request.clone();
+    let request = use_state(|| Option::<R>::None);
+
+    let deps = (request.clone(), options.deps);
+
     let (run, result) = inner::use_future_callback(
-        |_| async move {
+        |deps| async move {
+            let Some(ref request) = *(deps.0) else {
+                return None;
+            };
+
             if let Some(cache) = request.load(store) {
-                return Ok(cache);
+                return Some(Ok(cache));
             }
 
             let result = request.run().await;
+
+            if let Some(ref handler) = options.handler {
+                handler.emit(result.to_owned());
+            }
 
             if let Ok(ref data) = result {
                 R::store(data.to_owned());
             }
 
-            result
+            Some(result)
         },
         deps,
     );
 
-    let data = result.map(|res| res.map(|res| (*res).clone()));
+    let run = Callback::from(move |r| {
+        request.set(Some(r));
+        run.emit(());
+    });
 
-    LazyResponse { run, data }
+    if let Some(Ok(false)) = result.as_ref().map(|o| o.as_ref().map(|sr| sr.is_some())) {
+        return DynLazyResponse { run, data: None };
+    }
+
+    let data = result.map(|res| res.map(|res| (*res).clone().unwrap()));
+
+    DynLazyResponse { run, data }
 }
 
 /// from yew@next
